@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "algorithm": "TSN Multi-Frame Scheduler v4 (Enhanced Port Info)",
+    "time_unit": "microseconds (us)",
+    "port_naming_format": "NodeA_pX_to_NodeB_pY",
+    "nodes": 550,
+    "streams": 1000,
+    "total_frames": 14030,
+    "timestamp": 1761288028
+  },
+  "results": {
+    "total_streams": 1000,
+    "scheduled_streams": 804,
+    "partially_scheduled_streams": 196,
+    "failed_streams": 196,
+    "total_frames": 14030,
+    "scheduled_frames": 7027,
+    "failed_frames": 7003,
+    "frame_success_rate": 0.500855310049893,
+    "stream_success_rate": 0.804,
+    "scheduling_time": 6.40995717048645,
+    "schedule_entries": 39010,
+    "retry_attempts": 575
+  },
+  "requirements_met": {
+    "nodes_500plus": true,
+    "streams_1000plus": true,
+    "time_60min": true
+  },
+  "stream_statistics": {
+    "fully_scheduled": 804,
+    "partially_scheduled": 196,
+    "completely_failed": 0
+  }
+}
