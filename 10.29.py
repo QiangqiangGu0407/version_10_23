@@ -6,9 +6,10 @@ import heapq
 import logging
 import sys
 import os
+import random
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Set
-from collections import defaultdict
+from collections import defaultdict, deque
 from intervaltree import Interval, IntervalTree
 
 
@@ -36,7 +37,7 @@ PROPAGATION_DELAY_US = (LINK_LENGTH_M / LIGHT_SPEED_IN_FIBER) * 1e6  # 约0.5us
 FRAME_GAP_US = 50.0
 
 # 调度参数
-K_PATHS = 5  # K最短路径数量
+K_PATHS = 20  # K最短路径数量
 MAX_PORT_UTILIZATION = 0.9  # 端口最大利用率80%
 FRER_MIN_DISJOINT = 0.8  # FRER最小分离度60%
 FRER_MAX_LATENCY_DIFF_US = 10.0  # FRER最大延时差10us
@@ -489,143 +490,260 @@ class FlowManager:
 
 
 
-# K最短路径算法（Yen算法）
+# 快速路径查找器（混合策略）
 
 
-class YenKShortestPaths:
-    """Yen's K最短路径算法"""
+class FastPathFinder:
+    """快速路径查找器 - 使用混合策略快速生成大量候选路径"""
 
-    def __init__(self, adjacency: Dict):
+    def __init__(self, adjacency: Dict, nodes: Dict):
         self.adj = adjacency
+        self.nodes = nodes
+        # 区分端节点和交换机节点
+        self.endpoint_nodes = set()
+        self.switch_nodes = set()
+        for node_id, node_data in nodes.items():
+            if node_id.startswith('EP'):
+                self.endpoint_nodes.add(node_id)
+            else:
+                self.switch_nodes.add(node_id)
 
-    def dijkstra(self, source: str, destination: str,
-                 excluded_edges: set = None,
-                 excluded_nodes: set = None) -> Optional[Tuple[List[str], float]]:
-        """Dijkstra最短路径"""
-        if excluded_edges is None:
-            excluded_edges = set()
-        if excluded_nodes is None:
-            excluded_nodes = set()
+    def _can_pass_through(self, node: str, src: str, dst: str) -> bool:
+        """
+        检查节点是否可以作为路径中间节点
+        规则：只有交换机可以作为中间节点，端节点不能作为中间节点（除非它是源或目标）
+        """
+        if node == src or node == dst:
+            return True  # 源节点和目标节点总是可以的
+        return node in self.switch_nodes  # 中间节点必须是交换机
 
-        distances = {source: 0}
-        previous = {}
-        pq = [(0, source)]
+    def find_shortest_path(self, src: str, dst: str) -> Optional[List[str]]:
+        """Dijkstra最短路径 - 基于跳数"""
+        if src == dst:
+            return [src]
+
+        distances = {src: 0}
+        predecessors = {}
+        unvisited = [(0, src)]
         visited = set()
 
-        while pq:
-            current_dist, current = heapq.heappop(pq)
+        while unvisited:
+            current_dist, current = heapq.heappop(unvisited)
 
             if current in visited:
                 continue
             visited.add(current)
 
-            if current == destination:
-                path = []
-                node = destination
-                while node in previous:
-                    path.append(node)
-                    node = previous[node]
-                path.append(source)
-                path.reverse()
-                return path, current_dist
+            if current == dst:
+                # 重建路径
+                path_nodes = []
+                node = current
 
-            if current not in self.adj:
-                continue
+                while node is not None:
+                    path_nodes.append(node)
+                    node = predecessors.get(node)
 
-            for neighbor in self.adj[current]:
-                if neighbor.startswith('EP') and neighbor != destination:
-                    continue  # 跳过非目的端点节点
-                if neighbor in excluded_nodes:
-                    continue
-                if (current, neighbor) in excluded_edges:
+                path_nodes.reverse()
+                return path_nodes
+
+            for neighbor in self.adj.get(current, []):
+                if neighbor in visited:
                     continue
 
-                distance = current_dist + 1
+                # 检查邻居节点是否可以通过（不能经过其他端节点）
+                if not self._can_pass_through(neighbor, src, dst):
+                    continue
 
-                if neighbor not in distances or distance < distances[neighbor]:
-                    distances[neighbor] = distance
-                    previous[neighbor] = current
-                    heapq.heappush(pq, (distance, neighbor))
+                new_dist = current_dist + 1  # 只使用跳数
+
+                if neighbor not in distances or new_dist < distances[neighbor]:
+                    distances[neighbor] = new_dist
+                    predecessors[neighbor] = current
+                    heapq.heappush(unvisited, (new_dist, neighbor))
 
         return None
 
+    def find_random_walk_paths(self, src: str, dst: str, count: int, max_hops: int = 15) -> List[List[str]]:
+        """随机游走生成路径 - 快速但可能较长"""
+        paths = []
+        paths_set = set()
+        attempts = 0
+        max_attempts = count * 20
+
+        while len(paths) < count and attempts < max_attempts:
+            attempts += 1
+            current = src
+            path_nodes = [src]
+            visited = {src}
+
+            # 随机游走
+            for hop in range(max_hops):
+                if current == dst:
+                    break
+
+                # 获取有效邻居
+                neighbors = [n for n in self.adj.get(current, [])
+                           if n not in visited and self._can_pass_through(n, src, dst)]
+
+                # 如果没有未访问的邻居，允许访问已访问的
+                if not neighbors and hop < max_hops - 3:
+                    neighbors = [n for n in self.adj.get(current, [])
+                               if self._can_pass_through(n, src, dst)]
+
+                if not neighbors:
+                    break
+
+                # 随机选择，但偏向目标方向
+                if dst in neighbors and random.random() < 0.7:
+                    next_node = dst
+                else:
+                    next_node = random.choice(neighbors)
+
+                path_nodes.append(next_node)
+                visited.add(next_node)
+                current = next_node
+
+            # 如果到达目标，创建路径
+            if current == dst and len(path_nodes) > 1:
+                path_tuple = tuple(path_nodes)
+
+                if path_tuple not in paths_set:
+                    paths.append(path_nodes)
+                    paths_set.add(path_tuple)
+
+        return paths
+
+    def find_bfs_paths(self, src: str, dst: str, count: int, max_depth: int = 10) -> List[List[str]]:
+        """分层BFS生成路径"""
+        paths = []
+        paths_set = set()
+
+        # BFS队列
+        queue = deque([(src, [src], 0)])
+
+        while queue and len(paths) < count:
+            current, path, depth = queue.popleft()
+
+            if current == dst and len(path) > 1:
+                path_tuple = tuple(path)
+
+                if path_tuple not in paths_set:
+                    paths.append(path)
+                    paths_set.add(path_tuple)
+                continue
+
+            if depth >= max_depth:
+                continue
+
+            # 添加邻居到队列
+            for neighbor in self.adj.get(current, []):
+                if neighbor not in path and self._can_pass_through(neighbor, src, dst):
+                    new_path = path + [neighbor]
+                    queue.append((neighbor, new_path, depth + 1))
+
+        return paths
+
+    def find_dfs_paths(self, src: str, dst: str, count: int, max_depth: int = 12) -> List[List[str]]:
+        """深度优先搜索生成路径"""
+        paths = []
+        paths_set = set()
+
+        def dfs(current: str, path: List[str], depth: int):
+            if len(paths) >= count:
+                return
+
+            if current == dst and len(path) > 1:
+                path_tuple = tuple(path)
+
+                if path_tuple not in paths_set:
+                    paths.append(path.copy())
+                    paths_set.add(path_tuple)
+                return
+
+            if depth >= max_depth:
+                return
+
+            # 随机打乱邻居顺序增加多样性
+            neighbors = [n for n in self.adj.get(current, [])
+                        if self._can_pass_through(n, src, dst)]
+            random.shuffle(neighbors)
+
+            for neighbor in neighbors:
+                if neighbor not in path:
+                    path.append(neighbor)
+                    dfs(neighbor, path, depth + 1)
+                    path.pop()
+
+        dfs(src, [src], 0)
+        return paths
+
     def find_k_shortest_paths(self, source: str, destination: str, k: int) -> List[List[str]]:
-        """查找K条最短路径"""
-        if source == destination:
-            return [[source]]
+        """
+        混合快速算法 - 结合多种策略快速生成K条路径
+        优先速度，确保生成指定数量的路径
+        """
+        all_paths = []
+        paths_set = set()
 
-        A = []
-        B = []
+        # 策略1: 最短路径 (1条)
+        shortest = self.find_shortest_path(source, destination)
+        if shortest:
+            all_paths.append(shortest)
+            paths_set.add(tuple(shortest))
 
-        result = self.dijkstra(source, destination)
-        if result is None:
-            return []
+        # 策略2: 随机游走 (50%的路径) - 最快的方法
+        if len(all_paths) < k:
+            random_count = max(5, int(k * 0.5))
+            random_paths = self.find_random_walk_paths(source, destination, random_count)
+            for path in random_paths:
+                path_tuple = tuple(path)
+                if path_tuple not in paths_set:
+                    all_paths.append(path)
+                    paths_set.add(path_tuple)
 
-        path, cost = result
-        A.append(path)
+        # 策略3: DFS (20%的路径) - 速度较快
+        if len(all_paths) < k:
+            dfs_count = max(5, int(k * 0.5))
+            dfs_paths = self.find_dfs_paths(source, destination, dfs_count)
+            for path in dfs_paths:
+                path_tuple = tuple(path)
+                if path_tuple not in paths_set:
+                    all_paths.append(path)
+                    paths_set.add(path_tuple)
 
-        for k_iter in range(1, k):
-            if not A:
-                break
+        # 策略4: 继续用随机游走填充 (扩展搜索范围)
+        if len(all_paths) < k:
+            extra_random_count = k - len(all_paths)
+            extra_random_paths = self.find_random_walk_paths(source, destination, extra_random_count, max_hops=20)
+            for path in extra_random_paths:
+                path_tuple = tuple(path)
+                if path_tuple not in paths_set:
+                    all_paths.append(path)
+                    paths_set.add(path_tuple)
 
-            prev_path = A[k_iter - 1]
+        # 策略5 (最后备选): BFS - 仅在其他方法都不足时使用
+        if len(all_paths) < k:
+            bfs_count = k - len(all_paths)
+            if bfs_count > 0:
+                bfs_paths = self.find_bfs_paths(source, destination, bfs_count)
+                for path in bfs_paths:
+                    path_tuple = tuple(path)
+                    if path_tuple not in paths_set:
+                        all_paths.append(path)
+                        paths_set.add(path_tuple)
 
-            for i in range(len(prev_path) - 1):
-                spur_node = prev_path[i]  # 分裂点
-                root_path = prev_path[:i + 1]
-
-                excluded_edges = set()
-                excluded_nodes = set()
-
-                for existing_path in A:
-                    if len(existing_path) > i and existing_path[:i + 1] == root_path:
-                        if i + 1 < len(existing_path):
-                            excluded_edges.add((existing_path[i], existing_path[i + 1]))
-
-                for node in root_path[:-1]:
-                    if node != spur_node:
-                        excluded_nodes.add(node)
-
-                spur_result = self.dijkstra(spur_node, destination, excluded_edges, excluded_nodes)
-
-                if spur_result:
-                    spur_path, spur_cost = spur_result
-                    total_path = root_path[:-1] + spur_path
-                    total_cost = i + spur_cost
-
-                    path_exists = False
-                    for _, existing_path in B:
-                        if existing_path == total_path:
-                            path_exists = True
-                            break
-
-                    for existing_path in A:
-                        if existing_path == total_path:
-                            path_exists = True
-                            break
-
-                    if not path_exists:
-                        heapq.heappush(B, (total_cost, total_path))
-
-            if not B:
-                break
-
-            _, best_path = heapq.heappop(B)
-            A.append(best_path)
-
-        return A
-
+        return all_paths[:k]
 
 
 # 路径规划器
 
 
 class PathPlanner:
-    """路径规划器"""
+    """路径规划器 - 使用快速混合策略生成路径"""
 
     def __init__(self, topo: TopologyManager):
         self.topo = topo
-        self.ksp_finder = YenKShortestPaths(topo.adjacency)
+        self.path_finder = FastPathFinder(topo.adjacency, topo.nodes)
         self.path_usage_count = defaultdict(int)
 
     def plan_routes(self, flows: List[Flow]):
@@ -642,7 +760,7 @@ class PathPlanner:
 
     def _plan_single_flow(self, flow: Flow):
         """为单个流规划路径"""
-        paths = self.ksp_finder.find_k_shortest_paths(
+        paths = self.path_finder.find_k_shortest_paths(
             flow.source,
             flow.destination,
             K_PATHS
@@ -717,7 +835,7 @@ class PathPlanner:
         path_key = tuple(seg.src_node for seg in path.segments)
         usage_count = self.path_usage_count.get(path_key, 0)
         usage_score = 1.0 / (1 + usage_count)
-        print("当前路径平均负载" + str(avg_load))
+        # print("当前路径平均负载" + str(avg_load))
         min_bandwidth = min(self.topo.ports[seg.send_port_id].bandwidth_bps
                             for seg in path.segments) if path.segments else 0
         bandwidth_score = min_bandwidth / 1e9
