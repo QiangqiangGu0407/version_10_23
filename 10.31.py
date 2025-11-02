@@ -195,7 +195,7 @@ class Flow:
     scheduled: bool = False  # 是否已调度成功
     frer_enabled: bool = False  # 是否启用FRER冗余机制
 
-    # 时序关系相关字段（新增）
+    # 时序关系相关字段
     is_temporal: bool = False  # 是否是时序关系流
     temporal_order: int = -1  # 在时序链中的顺序（-1表示非时序流）
     delayed_start_time: float = 0.0  # 延迟启动时间（微秒）
@@ -2054,9 +2054,9 @@ def main():
         # 显示时序验证结果
         if 'temporal_constraints_validated' in statistics:
             if statistics['temporal_constraints_validated']:
-                logger.info("时序约束验证: ✓ 通过")
+                logger.info("时序约束验证:通过")
             else:
-                logger.warning("时序约束验证: ✗ 失败")
+                logger.warning("时序约束验证:失败")
                 if statistics.get('temporal_violations'):
                     logger.warning(f"违规数量: {len(statistics['temporal_violations'])}")
         sys.exit(0)
